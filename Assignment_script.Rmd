@@ -1,0 +1,160 @@
+---
+title: "Assignment 5 - Task 1: Analyze burial mound health"
+author: "Rebecca Folmer Schade"
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(knitr)
+library(rmdformats)
+
+## Global options
+options(max.print="75")
+opts_chunk$set(echo=TRUE,
+	             cache=TRUE,
+               prompt=FALSE,
+               tidy=TRUE,
+               comment=NA,
+               message=FALSE,
+               warning=FALSE)
+opts_knit$set(width=75)
+```
+
+A number of factors can negatively affect cultural heritage, from natural post-depositional processes, such as chemical and mechanical weathering, to animal-activity and human-inflicted damage, which can be either direct (excavation, looting) or indirect (development, agricultural activities, transport). In order to understand the anthropic impacts on cultural heritage, archaeologists routinely assess the condition of different types of cultural remains. In the burial mounds dataset, the Condition column contains a professional judgment of monument health recorded on a Likert-scale from 1 to 5, where 1 means the feature is in pristine state, while 5 means it is extinct or nearly so. The 'Robbed' column, specifies via a binary value of 1/0 (corresponding to Yes/No), whether looting was detected on site. The LandUse column contains the surrounding land use, which can also relate to the condition.  
+
+Design a study to evaluate direct or indirect impacts on burial mounds. You can use the provided datasets to extract a number of possible variables for this purpose:  
+
++ location-related variables such as elevation, aspect, slope (are mounds on steep slopes or in lower elevations disproportionately more vulnerable?)  
++ mound size (are larger mounds disproportionately affected by looters?)  
++ mound proximity to roads, rivers, nearest settlement boundary or center, regional capital boundary or center (do looters rob mounds that are closer to the settlements? are mounds near large urban centers disproportionally damaged/looted? are mounds in the vicinity of the Koprinka reservoir - the large dam in the middle of the valley, see kaz_lakes.shp - more damaged?)  
++ landuse around the mound (are mounds in agricultural fields more prone to damage than mounds in the forests?)  
+
+Take one or more questions and elaborate it into a study using spatial operations on vector and raster.  
+
+## Solution
+
+I have decided to examine the following questions in this assignment:  
++ mound proximity to roads, rivers, nearest settlement boundary or center, regional capital boundary or center (do looters rob mounds that are closer to the settlements? are mounds near large urban centers disproportionally damaged/looted? are mounds in the vicinity of the Koprinka reservoir - the large dam in the middle of the valley, see kaz_lakes.shp - more damaged?)
++ landuse around the mound (are mounds in agricultural fields more prone to damage than mounds in the forests?)
+That is to say, what effect the landuse around the mounds and their proximity to civilisation has on their condition. 
+
+### A Simple Analysis
+
+Due to a lack of time and lack of knowledge of the variables presumed to have an effect on the mounds, I have decided to go with a relatively simple analysis for this assignment. That is to say, I have decided to analyse the questions using models without interaction effects. This is conceptually simpler, though I do not have the knowledge to assume that the variables do not affect each other.
+
+### Loading Packages
+
+```{r}
+pacman::p_load(pacman, raster, sf, tidyverse, arm)
+```
+
+### Loading Data
+
+```{r}
+# KAZ_mounds.shp - for the geometry of the mounds
+kaz_mounds <- st_read("data/KAZ_mounds.shp")
+# KAZ_mdata.csv - for other data of the mounds
+kaz_mdata <- read_csv("data/KAZ_mdata.csv")
+# kaz_cities.shp - for the geometry of cities in the region
+kaz_cities <- st_read("data/kaz_cities.shp")
+# kaz_lakes.shp - for the geometry of waterbodies in the region
+kaz_lakes <- st_read("data/kaz_lakes.shp")
+
+```
+
+### Creating the dataframe
+
+```{r}
+# Joining kaz_mdata with kaz_mounds
+kaz_joined <- left_join(kaz_mounds, kaz_mdata, by = c("TRAP_Code" = "MoundID"))
+
+# Converting Condition and LandUse to a numeric and factor variable respectively
+kaz_mdata$Condition <- as.numeric(kaz_mdata$Condition)
+kaz_mdata$LandUse <- as.factor(kaz_mdata$LandUse)
+
+# Checking that the crs of the dataframes match
+crs(kaz_joined, asText = TRUE) == crs(kaz_cities, asText = TRUE) # Same crs
+crs(kaz_joined, asText = TRUE) == crs(kaz_lakes, asText = TRUE) # Same crs
+
+#===> Calculating distance to the nearest settlement
+# Creating an empthy variable for the distance to the nearest settlement
+kaz_joined <- kaz_joined %>% mutate(Settlement_dist = 0)
+
+# Using st_distance in a for loop to find the distance towards the nearest settlement for each mound
+for(mound in 1:773){
+  dist <- st_distance(kaz_joined[mound,10], kaz_cities)
+  kaz_joined[mound, 11] <- min(dist)
+}
+# (This works, but it takes a while)
+
+#===> Calculating vicinity to the Koprinika reservoir
+# Finding the Koprinika reservoir
+koprinka <- kaz_lakes %>% filter(Descr_en == "reservoir")
+koprinka <- koprinka %>% filter(SHAPE_Area == max(SHAPE_Area))
+
+# Creating an empthy variable for the distance to the Koprinka reservoir
+kaz_joined <- kaz_joined %>% mutate(Koprinka_dist = 0)
+
+# Using st_distance in a for loop to find each mound's distance towards the Koprinka reservoir
+for(mound in 1:773){
+  dist <- st_distance(kaz_joined[mound,10], koprinka)
+  kaz_joined[mound, 12] <- dist
+}
+
+```
+
+#### Running models
+To answer the research questions, I will be running two models witht he following independent variables:  
+
++ The variable "LandUse" (which contains categorical information of the landuse around the mounds)  
++ The variable "Settlement_dist" (the calculated distance to the nearest settlement)  
++ The variable "Koprinka_dist" (the calcuated distance to the Koprinka reservoir)  
+
+The two models have different dependent variables. One predicts the variable "Robbed", a binary varible indecating whether or not a mound has been looted (this is done using a logistic model). The other predicts the variable "Condition", an ordinal variable from 1 to 5 indicating the condition of the mound (1 meaning pristine condition and 5 meaning extinct), which is assumed to have a poisson distribution. The two models can be seen in pseudo-code below.  
+
+Model 1: Robbed ~ Landuse + dist. to neares settlement + dist. to Koprinka reservoir
+Model 2: Condition ~ Landuse + dist. to neares settlement + dist. to Koprinka reservoir
+
+```{r}
+# Running Model_1
+Model_1 <- glm(Condition ~ LandUse + Settlement_dist + Koprinka_dist, data = kaz_joined, family = poisson(link = "log"))
+# Summerizing the model
+summary(Model_1)
+# Rounding coefficients to 2 decimal points
+round(coef(Model_1), 2)
+# Rounding the standard errors to 2 decimal points
+round(se.coef(Model_1), 2)
+
+# Running Model_2
+Model_2 <- glm(Robbed ~ LandUse + Settlement_dist + Koprinka_dist, data = kaz_joined, family = binomial)
+# Summerizing the model
+summary(Model_2)
+# Converting the logodds into an oddsratio (rounded to two decimal points) for reporting
+results <- coef(Model_2)
+results
+round(exp(results),2)
+# Converting the logodds for the significant effects into probabilities (rounded to two decimal points) for interpretation
+# Intercept
+exp(results[1])/(1+exp(results[1])) # 0.9560035
+# LandUsePerennial
+exp(results[1] + results[5])/(1+exp(results[1] + results[5])) # 0.8844436
+# Koprinka Dist 
+exp(results[1] + results[4])/(1+exp(results[1] + results[4])) # 0.9552552
+# Rounding the standard errors to 2 decimal points
+round(se.coef(Model_2), 2)
+
+# What is the distribution of scores in the Robbed variable? 
+kaz_joined %>% 
+  group_by(Robbed) %>%
+  summarise(no_rows = length(Robbed))
+```
+
+## My Conclusion:
+
+In the first model, a significant effect of landuse was found when comparing the Annual condition to the Forest (b = -0.28 (SE = 0.09), z = -3.16, p < .05) and Pasture (b = -0.32 (SE = 0.06), z = -5.29, p < .05) conditions. In other words, forest and pasture landuse tend to have lower Condition scores (better condition) than annual landuse.  
+
+In the second model, a significant effect of distance to the Koprinka reservoir (b = -0.0002 (SE = 0.00), z = -6.24, p < .05, odds ratio = 1.00”), as well as of landuse when comparing the Annual condition to the Perennial condition was found (b = -1.04 (SE = 0.51), z = -2.03, p < .05, odds ratio = 0.35”). In other words, in the annual landuse condition, it is already very likely that a mound has been robbed (probablility = 0.956). More distance towrds the Koprinka reservoir lowers that chance a little (probability = 0.884) and so does having the perennial landuse condition, though only by a very small margin (probability = 0.955).  
+
+Though the model showed significant results, I do not have much faith in them. One one the reasons for this is that I am not confident that the construction of the models is conceptially sound (i.e. is it more likely that some of these effects interact? Shouls the models have random as well of fixed effects? I blame this on my lack of knowledge of the data and its collection, as well as my lack of time and energy to seek out this knowledge). Another reason is that all the significant effects (especially in the second model) seem to be very small. Lastly, the probabilities of mounds being robbed turned out to be quite high, even though the distribution of scores in the Robbed variable are relatively evenly distributed (366 untouched to 394 robbed).  
+
